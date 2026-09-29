@@ -1,0 +1,59 @@
+name: build-apk
+
+# 上传代码后自动开始打包；也可以在仓库的 Actions 页手动点「Run workflow」
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: 安装 Flutter（稳定版）
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: 生成安卓工程外壳（容易写错的文件交给 Flutter 官方工具自动生成）
+        run: flutter create --platforms=android --org com.nooti --project-name nooti_monitor .
+
+      - name: 还原我们自己写的界面代码（防止上一步覆盖）
+        run: git checkout -- lib/main.dart pubspec.yaml || true
+
+      - name: 注入通知监听原生代码（按文件名查找，不受文件夹大小写影响）
+        run: |
+          K=android/app/src/main/kotlin/com/nooti/monitor
+          mkdir -p "$K"
+          pick() { find . \( -path ./android -o -path ./.git \) -prune -o -type f -iname "$1" -print | head -n 1; }
+          cp "$(pick 'MainActivity.kt')"         "$K/MainActivity.kt"
+          cp "$(pick 'NootiListenerService.kt')" "$K/NootiListenerService.kt"
+          cp "$(pick 'CapturedStore.kt')"        "$K/CapturedStore.kt"
+          cp "$(pick 'AndroidManifest.xml')"     android/app/src/main/AndroidManifest.xml
+          if ! grep -q "nooti/listener" lib/main.dart; then
+            echo "!! lib/main.dart 缺失或不对：请确认上传了 lib 文件夹（里面有 main.dart）"
+            exit 1
+          fi
+          echo "--- 注入完成 ---"
+          ls -la "$K"
+
+      - name: 拉取依赖
+        run: flutter pub get
+
+      - name: 打包 APK（debug 版，免签名，装上就能跑）
+        run: flutter build apk --debug
+
+      - name: 产出安装包供下载
+        uses: actions/upload-artifact@v4
+        with:
+          name: nooti-monitor-apk
+          path: build/app/outputs/flutter-apk/app-debug.apk
