@@ -41,7 +41,7 @@ class TodoReceiver : BroadcastReceiver() {
                 intent.getStringExtra(EXTRA_TITLE) ?: "",
                 intent.getStringExtra(EXTRA_TEXT) ?: "",
                 intent.getStringExtra(EXTRA_PKG) ?: "",
-                intent.getStringExtra(EXTRA_KW) ?: "",
+                intent.getStringExtra(EXTRA_KW) ?: ""
             )
         }
 

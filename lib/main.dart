@@ -121,6 +121,32 @@ class _MonitorHomeState extends State<MonitorHome> {
     _saveRules();
   }
 
+  // 私聊设安静是危险操作：会让这个人的所有消息横幅消失（v5 已加格式保护，
+  // 但误加了之后自己都不容易发现原因），所以先弹确认说清楚后果
+  Future<void> _confirmPrivate(String name) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('这是私聊，确定要静音吗？'),
+        content: Text(
+          '把「$name」设为安静后，这个人发给你的消息也会不再弹横幅、不再响铃——'
+          '只有命中重点词时才提醒你。私聊一般不需要静音，确定要继续吗？',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('再想想'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('确定静音'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) _addGroupName(name);
+  }
+
   void _addKeyword(String v) {
     v = v.trim();
     if (v.isEmpty || _keywords.contains(v)) return;
@@ -455,8 +481,13 @@ class _MonitorHomeState extends State<MonitorHome> {
                         : const Color(0xFF6B7280),
                   ),
                   TextButton(
-                    onPressed: () => _addGroupName('${d['t'] ?? ''}'),
-                    child: const Text('设为安静', style: TextStyle(fontSize: 12.5)),
+                    onPressed: d['g'] == true
+                        ? () => _addGroupName('${d['t'] ?? ''}')
+                        : () => _confirmPrivate('${d['t'] ?? ''}'),
+                    child: Text(
+                      d['g'] == true ? '设为安静' : '设为安静（私聊慎用）',
+                      style: const TextStyle(fontSize: 12.5),
+                    ),
                   ),
                 ]),
               ),

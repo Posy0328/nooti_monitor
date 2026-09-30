@@ -85,7 +85,11 @@ class NootiListenerService : NotificationListenerService() {
                             }
                         }
                     }
-                    if (quiet && hit) {
+                    // 私聊保护：正文带「发送者: 内容」群格式才允许吞。
+                    // 防止在发现列表误把私聊「设为安静」后，把这个人以后的横幅也吞掉——
+                    // 私聊宁可漏静音，也必须保住它的横幅。
+                    val groupish = Regex("^[^\\s:：]{1,12}[:：].+").containsMatchIn(text)
+                    if (quiet && hit && groupish) {
                         muted = true
                         alerted = true
                         cancelSameConversation(sbn)
@@ -93,7 +97,7 @@ class NootiListenerService : NotificationListenerService() {
                             title, text, sbn.packageName ?: "", hitWord,
                             rules.optBoolean("fullscreen", false)
                         )
-                    } else if (quiet) {
+                    } else if (quiet && groupish) {
                         muted = true
                         cancelSameConversation(sbn)
                     }
