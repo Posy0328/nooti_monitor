@@ -3,6 +3,7 @@ package com.nooti.monitor
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
@@ -11,8 +12,8 @@ import io.flutter.plugin.common.MethodChannel
 
 /**
  * App 主入口：挂 Flutter 通道（nooti/listener）。
- * 提供：监听状态查询 / 跳授权页 / 抓包数据读写 / 过滤规则读写 /
- * 通知权限（重点提醒用）查询与申请。
+ * 提供：监听状态 / 跳授权页 / 抓包数据 / 过滤规则 / 发现的群组 /
+ * 通知权限与全屏提醒权限的查询和申请。
  */
 class MainActivity : FlutterActivity() {
 
@@ -42,6 +43,10 @@ class MainActivity : FlutterActivity() {
                         getSharedPreferences("nooti_rules", MODE_PRIVATE)
                             .getString("rules", "") ?: ""
                     )
+                    "getDiscovered" -> result.success(
+                        getSharedPreferences("nooti_rules", MODE_PRIVATE)
+                            .getString("discovered", "[]") ?: "[]"
+                    )
                     "canNotify" -> result.success(
                         (getSystemService(NotificationManager::class.java))
                             .areNotificationsEnabled()
@@ -51,6 +56,31 @@ class MainActivity : FlutterActivity() {
                             requestPermissions(
                                 arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1
                             )
+                        }
+                        result.success(true)
+                    }
+                    "canFullScreen" -> result.success(
+                        if (Build.VERSION.SDK_INT >= 34) {
+                            (getSystemService(NotificationManager::class.java))
+                                .canUseFullScreenIntent()
+                        } else true
+                    )
+                    "openFullScreenSettings" -> {
+                        try {
+                            if (Build.VERSION.SDK_INT >= 34) {
+                                startActivity(
+                                    Intent(
+                                        Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
+                                        Uri.parse("package:$packageName")
+                                    )
+                                )
+                            } else {
+                                startActivity(
+                                    Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                        .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                                )
+                            }
+                        } catch (_: Exception) {
                         }
                         result.success(true)
                     }

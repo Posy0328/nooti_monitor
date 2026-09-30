@@ -9,20 +9,19 @@ import android.content.Intent
 import android.os.Build
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
  * 通知监听服务：拿到「通知使用权」后，系统每弹出一条通知都会回调这里。
  *
- * 过滤规则（SharedPreferences 里的 JSON）：
- *   enabled  = 总开关
- *   groups   = 「安静群组」名单（通知标题包含其中任意一段即命中）
- *   keywords = 「重点词」名单（标题+正文包含即命中）
- *
- * 命中逻辑（只影响命中规则的群，个人私聊一律不碰）：
- *   安静群 + 含重点词 → 吞掉原通知，改由 Nooti 发高优先级的「重点提醒」
- *   安静群 + 无重点词 → 吞掉原通知（不响不弹），仅记录在列表里
- *   其他              → 不动，只记录
+ * v4 能力：
+ *  1) 过滤规则（SharedPreferences "nooti_rules"）：
+ *     enabled/groups/keywords —— 安静群吞通知，含重点词时改发全屏强提醒；
+ *     个人私聊一律不碰。
+ *  2) 自动发现（"discovered"）：记下微信/QQ里出现过消息的对话标题，
+ *     按「发送者: 内容」格式粗判是不是群，供界面一键「设为安静」。
+ *  3) 重点提醒升级为全屏弹窗（setFullScreenIntent，像来电一样）。
  */
 class NootiListenerService : NotificationListenerService() {
 
@@ -36,6 +35,9 @@ class NootiListenerService : NotificationListenerService() {
         val extras = n.extras
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
         val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
+
+        // 记住出现过的群/联系人（供用户一键设为安静）
+        recordDiscovered(sbn.packageName, title, text)
 
         // 系统级静默标记（渠道重要级别低，只是不响，通知仍进通知栏）
         var silent = false
@@ -106,6 +108,31 @@ class NootiListenerService : NotificationListenerService() {
         CapturedStore.add(item)
     }
 
+    // 把微信/QQ里出现过消息的对话标题记下来（标题去重，最多留 60 条）
+    private fun recordDiscovered(pkg: String, title: String, text: String) {
+        if (title.isBlank()) return
+        if (pkg != "com.tencent.mm" && pkg != "com.tencent.mobileqq") return
+        try {
+            val prefs = getSharedPreferences("nooti_rules", Context.MODE_PRIVATE)
+            val arr = JSONArray(prefs.getString("discovered", "[]") ?: "[]")
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                if (o.optString("pkg") == pkg && o.optString("t") == title) return
+            }
+            // 群消息的正文一般是「发送者: 内容」，私聊则没有发送者前缀——粗判群/私聊
+            val groupish = Regex("^[^\\s:：]{1,12}[:：].+").containsMatchIn(text)
+            val o = JSONObject()
+            o.put("pkg", pkg)
+            o.put("t", title)
+            o.put("g", groupish)
+            o.put("ts", System.currentTimeMillis())
+            arr.put(o)
+            while (arr.length() > 60) arr.remove(0)
+            prefs.edit().putString("discovered", arr.toString()).apply()
+        } catch (_: Exception) {
+        }
+    }
+
     private fun ensureChannels() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val nm = getSystemService(NotificationManager::class.java)
@@ -115,7 +142,7 @@ class NootiListenerService : NotificationListenerService() {
         }
     }
 
-    // 发 Nooti 自己的高优先级提醒（会响会弹横幅）
+    // 发 Nooti 自己的强提醒：高优先级 + 全屏弹窗（像来电一样，锁屏/其他App上都会弹）
     private fun postAlert(title: String, text: String) {
         try {
             ensureChannels()
@@ -135,6 +162,8 @@ class NootiListenerService : NotificationListenerService() {
                 .setContentText(text)
                 .setSmallIcon(android.R.drawable.ic_dialog_alert)
                 .setContentIntent(pi)
+                .setFullScreenIntent(pi, true)
+                .setCategory(Notification.CATEGORY_ALARM)
                 .setAutoCancel(true)
                 .build()
             val nm = getSystemService(NotificationManager::class.java)
