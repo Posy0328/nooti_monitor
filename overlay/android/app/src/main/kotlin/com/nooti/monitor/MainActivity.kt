@@ -47,6 +47,39 @@ class MainActivity : FlutterActivity() {
                         getSharedPreferences("nooti_rules", MODE_PRIVATE)
                             .getString("discovered", "[]") ?: "[]"
                     )
+                    "getTodos" -> result.success(TodoStore.list(this))
+                    "addTodo" -> {
+                        TodoStore.add(
+                            this,
+                            call.argument<String>("title") ?: "",
+                            call.argument<String>("text") ?: "",
+                            call.argument<String>("pkg") ?: "",
+                            call.argument<String>("kw") ?: "",
+                        )
+                        result.success(true)
+                    }
+                    "removeTodo" -> {
+                        TodoStore.remove(this, call.argument<String>("id") ?: "")
+                        result.success(true)
+                    }
+                    "toggleTodo" -> {
+                        TodoStore.toggle(this, call.argument<String>("id") ?: "")
+                        result.success(true)
+                    }
+                    "clearTodos" -> {
+                        TodoStore.clear(this)
+                        result.success(true)
+                    }
+                    "openNotifySettings" -> {
+                        try {
+                            startActivity(
+                                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                    .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                            )
+                        } catch (_: Exception) {
+                        }
+                        result.success(true)
+                    }
                     "canNotify" -> result.success(
                         (getSystemService(NotificationManager::class.java))
                             .areNotificationsEnabled()
@@ -89,7 +122,7 @@ class MainActivity : FlutterActivity() {
             }
     }
 
-    // 建「重点提醒」通道（高重要级=会响会弹）；重复创建是无害的空操作
+    // 建「重点提醒」通道（高重要级=会响 + 从顶部浮出小卡片）；重复创建是无害的空操作
     private fun ensureChannels() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val nm = getSystemService(NotificationManager::class.java)

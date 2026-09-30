@@ -15,13 +15,13 @@ import org.json.JSONObject
 /**
  * 通知监听服务：拿到「通知使用权」后，系统每弹出一条通知都会回调这里。
  *
- * v4 能力：
+ * v5 能力：
  *  1) 过滤规则（SharedPreferences "nooti_rules"）：
- *     enabled/groups/keywords —— 安静群吞通知，含重点词时改发全屏强提醒；
- *     个人私聊一律不碰。
- *  2) 自动发现（"discovered"）：记下微信/QQ里出现过消息的对话标题，
- *     按「发送者: 内容」格式粗判是不是群，供界面一键「设为安静」。
- *  3) 重点提醒升级为全屏弹窗（setFullScreenIntent，像来电一样）。
+ *     enabled/groups/keywords/fullscreen —— 安静群吞通知（含清掉它堆积的历史通知），
+ *     命中重点词时改发「小卡片」提醒，卡片上带「忽略」「收入待办」两个按钮。
+ *     全屏强提醒降级为可选项（默认关）。个人私聊一律不碰。
+ *  2) 自动发现（"discovered"）：记下微信/QQ里出现过消息的对话标题，供界面一键「设为安静」。
+ *  3) 命中记录带上是哪个词命中的，界面和待办里都能看到。
  */
 class NootiListenerService : NotificationListenerService() {
 
@@ -53,6 +53,7 @@ class NootiListenerService : NotificationListenerService() {
         // 按用户规则过滤
         var muted = false
         var alerted = false
+        var hitWord = ""
         try {
             val raw = getSharedPreferences("nooti_rules", Context.MODE_PRIVATE)
                 .getString("rules", "") ?: ""
@@ -79,6 +80,7 @@ class NootiListenerService : NotificationListenerService() {
                             val k = keywords.optString(i, "")
                             if (k.isNotBlank() && full.contains(k, ignoreCase = true)) {
                                 hit = true
+                                hitWord = k
                                 break
                             }
                         }
@@ -86,11 +88,14 @@ class NootiListenerService : NotificationListenerService() {
                     if (quiet && hit) {
                         muted = true
                         alerted = true
-                        try { cancelNotification(sbn.key) } catch (_: Exception) {}
-                        postAlert(title, text)
+                        cancelSameConversation(sbn)
+                        postCard(
+                            title, text, sbn.packageName ?: "", hitWord,
+                            rules.optBoolean("fullscreen", false)
+                        )
                     } else if (quiet) {
                         muted = true
-                        try { cancelNotification(sbn.key) } catch (_: Exception) {}
+                        cancelSameConversation(sbn)
                     }
                 }
             }
@@ -105,7 +110,38 @@ class NootiListenerService : NotificationListenerService() {
         item["silent"] = silent
         item["muted"] = muted
         item["alerted"] = alerted
+        item["kw"] = hitWord
         CapturedStore.add(item)
+    }
+
+    /**
+     * 静音一条群消息时，把同一个会话此前堆在通知栏里的通知也一并清掉。
+     * 否则一个群刷 20 条，通知栏会被它占满 —— 这也是用户抱怨「红点/消息堆」的一半来源。
+     */
+    private fun cancelSameConversation(sbn: StatusBarNotification) {
+        try {
+            cancelNotification(sbn.key)
+        } catch (_: Exception) {
+        }
+        try {
+            val title = sbn.notification?.extras
+                ?.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: return
+            if (title.isBlank()) return
+            val active = activeNotifications ?: return
+            for (other in active) {
+                if (other.packageName != sbn.packageName) continue
+                if (other.key == sbn.key) continue
+                val t = other.notification?.extras
+                    ?.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: continue
+                if (t == title) {
+                    try {
+                        cancelNotification(other.key)
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
     }
 
     // 把微信/QQ里出现过消息的对话标题记下来（标题去重，最多留 60 条）
@@ -136,39 +172,91 @@ class NootiListenerService : NotificationListenerService() {
     private fun ensureChannels() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val nm = getSystemService(NotificationManager::class.java)
+            // 高重要级 = 会响 + 从屏幕顶部浮出一张小卡片（heads-up）
             nm?.createNotificationChannel(
-                NotificationChannel("nooti_alert", "Nooti 重点提醒", NotificationManager.IMPORTANCE_HIGH)
+                NotificationChannel("nooti_alert", "Nooti 重点提醒", NotificationManager.IMPORTANCE_HIGH).apply {
+                    description = "群里出现重点词时，从屏幕顶部浮出一张小卡片"
+                    enableVibration(true)
+                }
             )
         }
     }
 
-    // 发 Nooti 自己的强提醒：高优先级 + 全屏弹窗（像来电一样，锁屏/其他App上都会弹）
-    private fun postAlert(title: String, text: String) {
+    /**
+     * 重点提醒卡片：从屏幕顶部浮出的一张小卡，几秒后自动收起，也可以手动叉掉。
+     * 卡片上两个按钮：忽略（叉掉）/ 收入待办（存进 App）。
+     *
+     * 默认是「小卡片」而不是全屏盖脸 —— 全屏只在用户在设置里主动开时才用。
+     */
+    private fun postCard(
+        title: String, text: String, pkg: String, kw: String, fullscreen: Boolean
+    ) {
         try {
             ensureChannels()
-            val pi = PendingIntent.getActivity(
-                this, 0,
-                Intent(this, MainActivity::class.java),
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            val nid = (System.currentTimeMillis() % 1000000).toInt()
+            val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+
+            // 点卡片本身 = 打开 Nooti
+            val openPi = PendingIntent.getActivity(
+                this, nid + 1,
+                Intent(this, MainActivity::class.java)
+                    .putExtra("from_alert", true),
+                flags
             )
+            // 「忽略」= 叉掉，什么都不留
+            val dismissPi = PendingIntent.getBroadcast(
+                this, nid + 2,
+                TodoReceiver.intent(this, TodoReceiver.ACTION_DISMISS, nid),
+                flags
+            )
+            // 「收入待办」= 存进待办池
+            val todoPi = PendingIntent.getBroadcast(
+                this, nid + 3,
+                TodoReceiver.intent(this, TodoReceiver.ACTION_TODO, nid)
+                    .putExtra(TodoReceiver.EXTRA_TITLE, title)
+                    .putExtra(TodoReceiver.EXTRA_TEXT, text)
+                    .putExtra(TodoReceiver.EXTRA_PKG, pkg)
+                    .putExtra(TodoReceiver.EXTRA_KW, kw),
+                flags
+            )
+
+            val head = if (kw.isNotBlank()) "命中「$kw」· $title" else "重要消息 · $title"
             val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 Notification.Builder(this, "nooti_alert")
             } else {
                 @Suppress("DEPRECATION")
                 Notification.Builder(this).setPriority(Notification.PRIORITY_HIGH)
             }
-            val notif = builder
-                .setContentTitle("重要消息 · $title")
+            builder
+                .setContentTitle(head)
                 .setContentText(text)
                 .setSmallIcon(android.R.drawable.ic_dialog_alert)
-                .setContentIntent(pi)
-                .setFullScreenIntent(pi, true)
-                .setCategory(Notification.CATEGORY_ALARM)
+                .setContentIntent(openPi)
                 .setAutoCancel(true)
-                .build()
+                .setCategory(Notification.CATEGORY_MESSAGE)
+                .addAction(action(android.R.drawable.ic_menu_close_clear_cancel, "忽略", dismissPi))
+                .addAction(action(android.R.drawable.ic_input_add, "收入待办", todoPi))
+
+            // 全屏强提醒是可选的：默认只浮小卡片，不盖住你正在做的事
+            if (fullscreen) {
+                builder
+                    .setCategory(Notification.CATEGORY_ALARM)
+                    .setFullScreenIntent(openPi, true)
+            }
+
             val nm = getSystemService(NotificationManager::class.java)
-            nm?.notify((System.currentTimeMillis() % 1000000).toInt(), notif)
+            nm?.notify(nid, builder.build())
         } catch (_: Exception) {
+        }
+    }
+
+    /** 卡片上的按钮（老系统没有 Action.Builder，退回老构造器） */
+    private fun action(icon: Int, label: String, pi: PendingIntent): Notification.Action {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            Notification.Action.Builder(icon, label, pi).build()
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Action(icon, label, pi)
         }
     }
 }

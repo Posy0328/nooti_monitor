@@ -33,6 +33,16 @@
             </intent-filter>
         </service>
 
+        <!-- 提醒卡片上的「忽略 / 收入待办」两个按钮 -->
+        <receiver
+            android:name="com.nooti.monitor.TodoReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.nooti.monitor.TODO"/>
+                <action android:name="com.nooti.monitor.DISMISS"/>
+            </intent-filter>
+        </receiver>
+
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
