@@ -47,6 +47,16 @@ class MainActivity : FlutterActivity() {
                         getSharedPreferences("nooti_rules", MODE_PRIVATE)
                             .getString("discovered", "[]") ?: "[]"
                     )
+                    "getLearned" -> result.success(GroupStore.list(this))
+                    "markAsGroup" -> {
+                        GroupStore.mark(
+                            this,
+                            call.argument<String>("pkg") ?: "com.tencent.mm",
+                            call.argument<String>("t") ?: "",
+                            call.argument<Boolean>("g") ?: true,
+                        )
+                        result.success(true)
+                    }
                     "getTodos" -> result.success(TodoStore.list(this))
                     "addTodo" -> {
                         TodoStore.add(

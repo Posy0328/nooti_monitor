@@ -40,6 +40,9 @@ jobs:
           cp "$(pick 'CapturedStore.kt')"        "$K/CapturedStore.kt"
           cp "$(pick 'TodoStore.kt')"            "$K/TodoStore.kt"
           cp "$(pick 'TodoReceiver.kt')"         "$K/TodoReceiver.kt"
+          cp "$(pick 'GroupStore.kt')"           "$K/GroupStore.kt"
+          cp "$(pick 'NotifInfo.kt')"            "$K/NotifInfo.kt"
+          cp "$(pick 'AlertActivity.kt')"        "$K/AlertActivity.kt"
           cp "$(pick 'AndroidManifest.xml')"     android/app/src/main/AndroidManifest.xml
           if ! grep -q "nooti/listener" lib/main.dart; then
             echo "!! lib/main.dart 缺失或不对：请确认上传了 lib 文件夹（里面有 main.dart）"

@@ -22,6 +22,16 @@
             </intent-filter>
         </activity>
 
+        <!-- 重点消息卡片：自己画的弹窗，透明底、可用全屏意图从锁屏或任意 App 上层弹出 -->
+        <activity
+            android:name="com.nooti.monitor.AlertActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity="com.nooti.monitor.alert"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <!-- 通知监听服务：系统的「通知使用权」就是授权给它 -->
         <service
             android:name="com.nooti.monitor.NootiListenerService"
