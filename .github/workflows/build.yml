@@ -5,6 +5,10 @@ on:
   push:
   workflow_dispatch:
 
+# 发布 Release 附件需要写权限
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -65,3 +69,13 @@ jobs:
         with:
           name: nooti-monitor-apk
           path: build/app/outputs/flutter-apk/app-debug.apk
+
+      # 再发一份到 Release：这样不需要登录 GitHub 也能直接下载 apk
+      - name: 发布到 Release（免登录下载）
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-${{ github.run_number }}
+          name: "Nooti 监听 · 构建 ${{ github.run_number }}"
+          body: "自动构建产物（app-debug.apk）"
+          files: build/app/outputs/flutter-apk/app-debug.apk
+          make_latest: true
