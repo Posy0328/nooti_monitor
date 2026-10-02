@@ -1,5 +1,6 @@
 package com.nooti.monitor
 
+import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,6 +8,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.PowerManager
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import org.json.JSONArray
@@ -59,6 +61,7 @@ class NootiListenerService : NotificationListenerService() {
         var muted = false
         var alerted = false
         var hitWord = ""
+        var level = NotifInfo.LEVEL_GENERAL
         var reason = "不过滤（没开总开关）"
 
         try {
@@ -108,13 +111,13 @@ class NootiListenerService : NotificationListenerService() {
 
                     if (quiet && hitWord.isNotEmpty() && swallowable) {
                         muted = true
-                        val level = NotifInfo.levelOf("$title $text", hitWord, levelsFrom(rules))
+                        level = NotifInfo.levelOf("$title $text", hitWord, levelsFrom(rules))
                         val minLevel = rules.optInt("minLevel", 0)
                         cancelSameConversation(sbn)
                         if (level >= minLevel) {
                             alerted = true
-                            reason = "命中「$hitWord」· ${NotifInfo.levelName(level)}，弹卡片"
-                            popCard(title, text, pkgName, hitWord, rules, isGroup, level)
+                            val how = popCard(title, text, pkgName, hitWord, rules, isGroup, level)
+                            reason = "命中「$hitWord」· ${NotifInfo.levelName(level)} → $how"
                         } else {
                             reason = "命中「$hitWord」但等级不够（${NotifInfo.levelName(level)}），只安静收录"
                         }
@@ -146,9 +149,12 @@ class NootiListenerService : NotificationListenerService() {
         item["muted"] = muted
         item["alerted"] = alerted
         item["isGroup"] = isGroup
+        item["level"] = level
         item["reason"] = reason
         item["kw"] = hitWord
         CapturedStore.add(item)
+        // 全量落盘：测试期用来统计「一共收到了多少、都是什么」，不管它重不重要
+        InboxStore.add(this, item)
     }
 
     /** 读取用户给每个关键词标过的等级 */
@@ -160,42 +166,82 @@ class NootiListenerService : NotificationListenerService() {
         return m
     }
 
-    /** 弹出我们自己画的卡片（走全屏意图；系统不允许时会降级成一条横幅兜底） */
+    /**
+     * 弹卡片。返回「实际用了哪条通道」，写进诊断里方便排查。
+     *
+     * 通道优先级：
+     *   ① 亮屏 + 有悬浮窗权限 → OverlayAlert，卡片直接盖在屏幕正中央，不用点、不会溜走；
+     *   ② 锁屏 / 息屏 / 没悬浮窗权限 → 全屏意图，锁屏下系统会给全屏，亮屏没权限时降级成横幅。
+     */
     private fun popCard(
         group: String, rawText: String, pkg: String, kw: String,
         rules: JSONObject, isGroup: Boolean, level: Int
-    ) {
-        try {
-            // 同群 8 秒去重，防止一分钟刷十张卡片
-            val now = System.currentTimeMillis()
-            if (now - (lastAlertAt[group] ?: 0L) < 8000) return
-            lastAlertAt[group] = now
+    ): String {
+        // 同群 8 秒去重，防止一分钟刷十张卡片
+        val now = System.currentTimeMillis()
+        if (now - (lastAlertAt[group] ?: 0L) < 8000) return "刚弹过，8 秒内去重"
+        lastAlertAt[group] = now
 
+        try {
             ensureChannels()
-            val nid = (now % 1000000).toInt()
 
             val pair = if (isGroup) NotifInfo.splitSender(rawText) else null
-            val sender = pair?.first ?: ""
-            val body = pair?.second ?: rawText
+            val data = AlertData(
+                group = group,
+                sender = pair?.first ?: "",
+                body = pair?.second ?: rawText,
+                level = level,
+                pkg = pkg,
+                kw = kw,
+                whenTxt = NotifInfo.pickTime(pair?.second ?: rawText),
+                place = NotifInfo.pickPlace(pair?.second ?: rawText),
+                event = NotifInfo.pickEvent(pair?.second ?: rawText),
+            )
 
+            // 等级越高，卡片挂得越久（紧急的不容易错过）
+            val autoMs = when (level) {
+                NotifInfo.LEVEL_URGENT -> 60_000L
+                NotifInfo.LEVEL_IMPORTANT -> 35_000L
+                else -> 20_000L
+            }
+
+            val km = getSystemService(KeyguardManager::class.java)
+            val locked = km?.isKeyguardLocked ?: false
+            val pm = getSystemService(PowerManager::class.java)
+            val screenOn = pm?.isInteractive ?: true
+
+            if (!locked && screenOn && OverlayAlert.show(this, data, autoMs)) {
+                return "悬浮窗卡片（屏幕中央）"
+            }
+
+            postFullScreen(data, level, now)
+            return if (!OverlayAlert.canShow(this)) "全屏兜底 · 缺「悬浮窗」权限"
+            else "全屏兜底（锁屏/息屏）"
+        } catch (e: Exception) {
+            return "弹出失败：${e.message}"
+        }
+    }
+
+    /** 全屏意图兜底：锁屏时系统会给全屏；亮屏且没有悬浮窗权限时会降级成横幅 */
+    private fun postFullScreen(data: AlertData, level: Int, now: Long) {
+        try {
+            val nid = (now % 1000000).toInt()
             val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             val alert = Intent(this, AlertActivity::class.java).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                putExtra(AlertActivity.EXTRA_GROUP, group)
-                putExtra(AlertActivity.EXTRA_SENDER, sender)
-                putExtra(AlertActivity.EXTRA_BODY, body)
+                putExtra(AlertActivity.EXTRA_GROUP, data.group)
+                putExtra(AlertActivity.EXTRA_SENDER, data.sender)
+                putExtra(AlertActivity.EXTRA_BODY, data.body)
                 putExtra(AlertActivity.EXTRA_LEVEL, level)
-                putExtra(AlertActivity.EXTRA_PKG, pkg)
-                putExtra(AlertActivity.EXTRA_KW, kw)
-                putExtra(AlertActivity.EXTRA_TIME, NotifInfo.pickTime(body))
-                putExtra(AlertActivity.EXTRA_PLACE, NotifInfo.pickPlace(body))
-                putExtra(AlertActivity.EXTRA_EVENT, NotifInfo.pickEvent(body))
+                putExtra(AlertActivity.EXTRA_PKG, data.pkg)
+                putExtra(AlertActivity.EXTRA_KW, data.kw)
+                putExtra(AlertActivity.EXTRA_TIME, data.whenTxt)
+                putExtra(AlertActivity.EXTRA_PLACE, data.place)
+                putExtra(AlertActivity.EXTRA_EVENT, data.event)
                 putExtra(AlertActivity.EXTRA_NID, nid)
             }
             val pi = PendingIntent.getActivity(this, nid, alert, flags)
 
-            // 兜底通知：系统若不让全屏，它会以横幅形式出现；卡片正常弹出时，
-            // 用户在卡片上处理完，AlertActivity 会把这条通知撤掉，不留痕迹。
             val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 Notification.Builder(this, "nooti_alert")
             } else {
@@ -203,8 +249,8 @@ class NootiListenerService : NotificationListenerService() {
                 Notification.Builder(this).setPriority(Notification.PRIORITY_HIGH)
             }
             builder
-                .setContentTitle("${NotifInfo.levelName(level)} · $group")
-                .setContentText(body)
+                .setContentTitle("${NotifInfo.levelName(level)} · ${data.group}")
+                .setContentText(data.body)
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setContentIntent(pi)
                 .setFullScreenIntent(pi, true)

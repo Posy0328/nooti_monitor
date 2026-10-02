@@ -67,20 +67,23 @@ class MonitorHome extends StatefulWidget {
   State<MonitorHome> createState() => _MonitorHomeState();
 }
 
-class _MonitorHomeState extends State<MonitorHome> {
-  int _tab = 0;                  // 0=监听  1=待办
+class _MonitorHomeState extends State<MonitorHome> with WidgetsBindingObserver {
+  int _tab = 0;                  // 0=监听  1=消息  2=待办
   bool _enabled = false;         // 通知使用权
   bool _canNotify = false;       // Nooti 发提醒的权限
+  bool _overlayOk = false;       // 悬浮窗权限：卡片能不能霸道地盖在屏幕正中央
   bool _filterOn = true;         // 过滤总开关
   bool _allGroups = true;        // 所有群都安静（默认开：不用一个个加群名）
   int _minLevel = _kGeneral;     // 弹卡门槛：0 全部 / 1 重要以上 / 2 只有紧急
+  int _inboxFilter = 0;          // 消息页筛选：0 全部 / 1 弹过卡 / 2 已静音 / 3 群消息
 
   List<String> _groups = [];                   // 安静群组（手动名单）
   List<String> _keywords = [];                 // 重点提醒词
   Map<String, int> _kwLevels = {};             // 词 → 等级
   List<String> _learnedTitles = [];            // 系统认出来的群名
   List<Map<String, dynamic>> _discovered = []; // 见过消息的会话
-  List<Map<String, dynamic>> _items = [];      // 抓包流水
+  List<Map<String, dynamic>> _items = [];      // 抓包流水（最近60条，诊断用）
+  List<Map<String, dynamic>> _inbox = [];      // 全量收到的消息（落盘）
   List<Map<String, dynamic>> _todos = [];      // 待办池
 
   Timer? _timer;
@@ -91,19 +94,27 @@ class _MonitorHomeState extends State<MonitorHome> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadRules();
     _loadLearned();
     _refresh();
+    _hideOverlay();   // 人已经在 App 里了，卡片不用再压在屏幕上
     _timer = Timer.periodic(const Duration(seconds: 1), (_) => _refresh());
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _timer?.cancel();
     _groupCtrl.dispose();
     _kwCtrl.dispose();
     _todoCtrl.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _hideOverlay();
   }
 
   // ---------- 规则读写 ----------
@@ -198,10 +209,11 @@ class _MonitorHomeState extends State<MonitorHome> {
   // ---------- 数据刷新 ----------
 
   Future<void> _refresh() async {
-    bool enabled = false, canNotify = false;
+    bool enabled = false, canNotify = false, overlayOk = false;
     List<Map<String, dynamic>> items = const [];
     List<Map<String, dynamic>> discovered = const [];
     List<Map<String, dynamic>> todos = const [];
+    List<Map<String, dynamic>> inbox = const [];
     try {
       enabled = await _ch.invokeMethod<bool>('isEnabled') ?? false;
     } catch (_) {}
@@ -209,9 +221,18 @@ class _MonitorHomeState extends State<MonitorHome> {
       canNotify = await _ch.invokeMethod<bool>('canNotify') ?? false;
     } catch (_) {}
     try {
+      overlayOk = await _ch.invokeMethod<bool>('canOverlay') ?? false;
+    } catch (_) {}
+    try {
       final list = await _ch.invokeMethod<List<dynamic>>('getCaptured');
       if (list != null) {
         items = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+      }
+    } catch (_) {}
+    try {
+      final list = await _ch.invokeMethod<List<dynamic>>('getInbox');
+      if (list != null) {
+        inbox = list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
       }
     } catch (_) {}
     try {
@@ -236,7 +257,9 @@ class _MonitorHomeState extends State<MonitorHome> {
     setState(() {
       _enabled = enabled;
       _canNotify = canNotify;
+      _overlayOk = overlayOk;
       _items = items;
+      _inbox = inbox;
       _discovered = discovered;
       _todos = todos;
     });
@@ -260,11 +283,23 @@ class _MonitorHomeState extends State<MonitorHome> {
     } catch (_) {}
   }
 
-  Future<void> _clear() async {
+  Future<void> _openOverlaySettings() async {
     try {
-      await _ch.invokeMethod('clear');
+      await _ch.invokeMethod('openOverlaySettings');
     } catch (_) {}
-    if (mounted) setState(() => _items = []);
+  }
+
+  Future<void> _hideOverlay() async {
+    try {
+      await _ch.invokeMethod('hideOverlay');
+    } catch (_) {}
+  }
+
+  Future<void> _clearInbox() async {
+    try {
+      await _ch.invokeMethod('clearInbox');
+    } catch (_) {}
+    if (mounted) setState(() => _inbox = []);
   }
 
   Future<void> _markGroup(String pkg, String t, bool g) async {
@@ -415,6 +450,38 @@ class _MonitorHomeState extends State<MonitorHome> {
             TextButton(onPressed: _requestNotify, child: const Text('去开启')),
           ]),
         ),
+
+      // 悬浮窗权限 —— 卡片能不能「霸道地出现在屏幕正中央」，全看它
+      Container(
+        margin: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+            color: _overlayOk ? const Color(0xFFEAF7EE) : const Color(0xFFFFF4E5),
+            borderRadius: BorderRadius.circular(12)),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Icon(_overlayOk ? Icons.layers_rounded : Icons.warning_amber_rounded,
+                color: _overlayOk ? const Color(0xFF16A34A) : const Color(0xFFE08A00)),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                _overlayOk ? '悬浮窗已开：卡片会直接盖在屏幕正中央' : '还差一步：卡片弹不到屏幕正中央',
+                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+              ),
+            ),
+            if (!_overlayOk)
+              TextButton(onPressed: _openOverlaySettings, child: const Text('去开启')),
+          ]),
+          if (!_overlayOk) ...[
+            const SizedBox(height: 4),
+            const Text(
+              '没有这个权限，卡片只能变成系统横幅，从顶部溜一下就没了 —— 就是你说的那种「跟普通弹窗一样」。'
+              '去打开的页面里找到 Nooti监听，把「显示在其他应用上层 / 悬浮窗」打开。',
+              style: TextStyle(fontSize: 11.5, color: Color(0xFF9A5410), height: 1.5),
+            ),
+          ],
+        ]),
+      ),
 
       // 必读：微信的免打扰必须关掉，否则微信自己就不发通知，谁也抓不到
       _card(
@@ -620,29 +687,145 @@ class _MonitorHomeState extends State<MonitorHome> {
           ]),
         ),
 
-      // 诊断
-      const Padding(
-        padding: EdgeInsets.fromLTRB(20, 14, 16, 4),
-        child: Text('抓到的通知（含判定原因）',
-            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
+      // 详细流水挪到「消息」页去了，这里只留一句指引
+      _card(
+        child: Row(children: [
+          const Icon(Icons.list_alt_rounded, size: 18, color: Color(0xFF8A93A5)),
+          const SizedBox(width: 8),
+          Expanded(child: _note('收到的每一条消息（含为什么被静音）都在底部「消息」页，测试期去看那里统计。')),
+        ]),
       ),
-      if (_items.isEmpty)
-        const Padding(
-          padding: EdgeInsets.all(32),
-          child: Center(child: Text('还没有抓到任何通知', style: TextStyle(color: Colors.black38))),
+
+      const SizedBox(height: 80),
+    ]);
+  }
+
+  // ---------- 页二：消息（全量收录，测试期统计用） ----------
+
+  List<Map<String, dynamic>> get _inboxShown {
+    switch (_inboxFilter) {
+      case 1:
+        return _inbox.where((m) => m['alerted'] == true).toList();
+      case 2:
+        return _inbox.where((m) => m['muted'] == true).toList();
+      case 3:
+        return _inbox.where((m) => m['isGroup'] == true).toList();
+      default:
+        return _inbox;
+    }
+  }
+
+  Widget _statCol(String label, Object n, Color c) => Expanded(
+        child: Column(children: [
+          Text('$n',
+              style: TextStyle(fontSize: 21, fontWeight: FontWeight.w800, color: c)),
+          const SizedBox(height: 2),
+          Text(label, style: const TextStyle(fontSize: 11, color: Colors.black54)),
+        ]),
+      );
+
+  Future<void> _clearInboxAsk() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('清空收到的消息？'),
+        content: const Text('只会清掉这份统计列表；待办和过滤规则不受影响。'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('取消')),
+          FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('清空')),
+        ],
+      ),
+    );
+    if (ok == true) await _clearInbox();
+  }
+
+  Widget _buildInbox() {
+    final alerted = _inbox.where((m) => m['alerted'] == true).length;
+    final muted = _inbox.where((m) => m['muted'] == true).length;
+    final groups = _inbox.where((m) => m['isGroup'] == true).length;
+    final chats = _inbox.map((m) => '${m['title']}').toSet().length;
+    final shown = _inboxShown;
+
+    return ListView(children: [
+      _card(
+        margin: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            const Icon(Icons.forum_rounded, size: 18, color: _cGeneral),
+            const SizedBox(width: 8),
+            Text('一共收到 ${_inbox.length} 条',
+                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+            const Spacer(),
+            TextButton(
+              onPressed: _inbox.isEmpty ? null : _clearInboxAsk,
+              child: const Text('清空', style: TextStyle(fontSize: 12)),
+            ),
+          ]),
+          const SizedBox(height: 2),
+          _note('测试期专用：不管那条消息重不重要、有没有弹卡片、有没有进待办，这里都留一份。'
+              '不用盯着屏幕，回头翻这一页就知道一共收到了多少、都是什么。'),
+          const SizedBox(height: 14),
+          Row(children: [
+            _statCol('弹过卡片', alerted, _cUrgent),
+            _statCol('被静音', muted, const Color(0xFF6B7280)),
+            _statCol('来自群', groups, _cGeneral),
+            _statCol('会话数', chats, const Color(0xFF7C4DFF)),
+          ]),
+          if (_inbox.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            _note('最早 ${_fmtTime(_inbox.last['time'])} · 最近 ${_fmtTime(_inbox.first['time'])}'),
+          ],
+        ]),
+      ),
+
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+        child: Wrap(spacing: 6, runSpacing: 4, children: [
+          for (final f in const [
+            ['全部', 0],
+            ['弹过卡', 1],
+            ['被静音', 2],
+            ['群消息', 3],
+          ])
+            ChoiceChip(
+              label: Text('${f[0]}', style: const TextStyle(fontSize: 12)),
+              selected: _inboxFilter == f[1],
+              onSelected: (_) => setState(() => _inboxFilter = f[1] as int),
+              visualDensity: VisualDensity.compact,
+            ),
+        ]),
+      ),
+
+      if (shown.isEmpty)
+        Padding(
+          padding: const EdgeInsets.all(40),
+          child: Center(
+            child: Text(_inbox.isEmpty ? '还没收到任何消息' : '这个筛选下没有消息',
+                style: const TextStyle(color: Colors.black38)),
+          ),
         )
       else
-        for (final m in _items)
+        for (final m in shown)
           Builder(builder: (_) {
             final bool muted = m['muted'] == true;
             final bool alerted = m['alerted'] == true;
             final bool isGroup = m['isGroup'] == true;
+            final int lv = (m['level'] as num?)?.toInt() ?? _kGeneral;
             final String app = _appName('${m['pkg'] ?? ''}');
+            final int cnt = (m['count'] as num?)?.toInt() ?? 1;
             return Card(
               margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
               child: ListTile(
                 dense: true,
-                leading: CircleAvatar(child: Text(app.isEmpty ? '?' : app.substring(0, 1))),
+                leading: Container(
+                  width: 10,
+                  height: 10,
+                  margin: const EdgeInsets.only(top: 6),
+                  decoration: BoxDecoration(
+                    color: alerted ? _levelColor(lv) : const Color(0xFFD3D9E3),
+                    shape: BoxShape.circle,
+                  ),
+                ),
                 title: Row(children: [
                   Expanded(
                     child: Text('$app · ${m['title'] ?? ''}',
@@ -650,6 +833,7 @@ class _MonitorHomeState extends State<MonitorHome> {
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600)),
                   ),
+                  if (cnt > 1) _badge('×$cnt', const Color(0xFFEEEFF3), const Color(0xFF6B7280)),
                   if (alerted) _badge('弹卡片', const Color(0xFFFDECEC), _cUrgent),
                   if (muted && !alerted)
                     _badge('已静音', const Color(0xFFEEEFF3), const Color(0xFF6B7280)),
@@ -751,8 +935,10 @@ class _MonitorHomeState extends State<MonitorHome> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(_tab == 0 ? 'Nooti 监听' : '待办')),
-      body: IndexedStack(index: _tab, children: [_buildMonitor(), _buildTodo()]),
+      appBar: AppBar(
+          title: Text(_tab == 0 ? 'Nooti 监听' : (_tab == 1 ? '收到的消息' : '待办'))),
+      body: IndexedStack(
+          index: _tab, children: [_buildMonitor(), _buildInbox(), _buildTodo()]),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tab,
         onDestinationSelected: (i) => setState(() => _tab = i),
@@ -761,6 +947,15 @@ class _MonitorHomeState extends State<MonitorHome> {
               icon: Icon(Icons.hearing_outlined),
               selectedIcon: Icon(Icons.hearing),
               label: '监听'),
+          NavigationDestination(
+            icon: Badge(
+              isLabelVisible: _inbox.isNotEmpty,
+              label: Text('${_inbox.length}'),
+              child: const Icon(Icons.forum_outlined),
+            ),
+            selectedIcon: const Icon(Icons.forum_rounded),
+            label: '消息',
+          ),
           NavigationDestination(
             icon: Badge(
               isLabelVisible: _todos.isNotEmpty,
@@ -772,13 +967,6 @@ class _MonitorHomeState extends State<MonitorHome> {
           ),
         ],
       ),
-      floatingActionButton: _tab == 0 && _items.isNotEmpty
-          ? FloatingActionButton.extended(
-              onPressed: _clear,
-              icon: const Icon(Icons.delete_outline),
-              label: const Text('清空流水'),
-            )
-          : null,
     );
   }
 }

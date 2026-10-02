@@ -58,6 +58,32 @@ class MainActivity : FlutterActivity() {
                         result.success(true)
                     }
                     "getTodos" -> result.success(TodoStore.list(this))
+                    // 全量收录：测试期用来统计收到了多少消息
+                    "getInbox" -> result.success(InboxStore.list(this))
+                    "clearInbox" -> {
+                        InboxStore.clear(this)
+                        result.success(true)
+                    }
+                    // 悬浮窗权限：卡片要霸道地盖在屏幕中央，就靠它
+                    "canOverlay" -> result.success(OverlayAlert.canShow(this))
+                    "openOverlaySettings" -> {
+                        try {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                startActivity(
+                                    Intent(
+                                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                        Uri.parse("package:$packageName")
+                                    )
+                                )
+                            }
+                        } catch (_: Exception) {
+                        }
+                        result.success(true)
+                    }
+                    "hideOverlay" -> {
+                        OverlayAlert.dismissAll(this)
+                        result.success(true)
+                    }
                     "addTodo" -> {
                         TodoStore.add(
                             this,
