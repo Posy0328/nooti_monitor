@@ -3,6 +3,11 @@
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
     <!-- 悬浮窗：把提醒卡片直接盖在屏幕正中央（绕过系统的横幅降级），需要用户手动授权 -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+    <!-- 前台保活服务：挂一条常驻通知抬高进程优先级，防止被系统杀掉 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+    <!-- 申请加入电池优化白名单 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
     <application
         android:label="Nooti监听"
         android:name="${applicationName}"
@@ -43,6 +48,16 @@
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
+        </service>
+
+        <!-- 前台保活：常驻一条低打扰通知，防止监听被系统杀掉 -->
+        <service
+            android:name="com.nooti.monitor.KeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="keep notification listener alive" />
         </service>
 
         <!-- 提醒卡片上的「忽略 / 收入待办」两个按钮 -->

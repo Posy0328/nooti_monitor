@@ -32,15 +32,47 @@ class NootiListenerService : NotificationListenerService() {
     override fun onCreate() {
         super.onCreate()
         ensureChannels()
+        KeepAliveService.start(this)
+    }
+
+    // 服务被系统绑上时打个时间戳：界面据此判断「监听服务还活着吗」
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        touchAlive()
+        KeepAliveService.start(this)
+    }
+
+    private fun touchAlive() {
+        try {
+            getSharedPreferences("nooti_rules", Context.MODE_PRIVATE)
+                .edit().putLong("listener_ts", System.currentTimeMillis()).apply()
+        } catch (_: Exception) {
+        }
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
+        touchAlive()
         val n = sbn.notification ?: return
+        val pkgName = sbn.packageName ?: ""
+
+        // 自己的通知（保活常驻条、提醒兜底）直接跳过，省得自己抓自己
+        if (pkgName == packageName) return
+        // 持续性通知（网速统计、音乐播放、下载进度……）不是消息，不看
+        if ((n.flags and Notification.FLAG_ONGOING_EVENT) != 0) return
+
+        // 默认只盯聊天应用；watchOthers 打开时才把其他应用也收进来（测试用）
+        val prefsEarly = getSharedPreferences("nooti_rules", Context.MODE_PRIVATE)
+        val watchOthers = try {
+            JSONObject(prefsEarly.getString("rules", "") ?: "").optBoolean("watchOthers", false)
+        } catch (_: Exception) {
+            false
+        }
+        if (!ChatApps.isChat(pkgName) && !watchOthers) return
+
         val extras = n.extras
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
         val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
 
-        val pkgName = sbn.packageName ?: ""
         var isGroup = NotifInfo.looksLikeGroup(text)
         // 自动学习：出现过群格式的会话，永久记为群；下次连图片消息也能认出来
         if (isGroup && title.isNotBlank()) GroupStore.mark(this, pkgName, title, true)
@@ -77,15 +109,15 @@ class NootiListenerService : NotificationListenerService() {
                 } else if (sbn.packageName == packageName) {
                     reason = "Nooti 自己的通知"
                 } else {
-                    // 这个会话要不要安静：名字在名单里，或者「所有群都安静」模式下认出来的群
+                    // 这个会话要不要安静：名字在名单里，或者「所有群都安静」模式下认出来的群。
+                    // 注意：名单只比「会话名」，不比消息正文——否则私聊里提一句群名也会被误吞
+                    // （真机踩过：个人对话框被屏蔽）。
                     var named = false
                     val groups = rules.optJSONArray("groups")
                     if (groups != null) {
                         for (i in 0 until groups.length()) {
                             val g = groups.optString(i, "")
-                            if (g.isNotBlank() &&
-                                (title.contains(g, true) || text.contains(g, true))
-                            ) {
+                            if (g.isNotBlank() && title.contains(g, true)) {
                                 named = true
                                 break
                             }

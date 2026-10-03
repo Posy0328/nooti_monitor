@@ -2,9 +2,11 @@ package com.nooti.monitor
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -20,10 +22,103 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         ensureChannels()
+        // 用户打开 App 时顺手把保活服务拉起来——它活着，监听才不容易被系统杀掉
+        KeepAliveService.start(this)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "nooti/listener")
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "isEnabled" -> result.success(isListenerEnabled())
+                    // 监听服务的心跳：授权在但长时间没心跳 = 服务被系统杀了/解绑了
+                    "listenerAlive" -> {
+                        val ts = getSharedPreferences("nooti_rules", MODE_PRIVATE)
+                            .getLong("listener_ts", 0L)
+                        result.success(ts)
+                    }
+                    "requestRebind" -> {
+                        try {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                                android.service.notification.NotificationListenerService
+                                    .requestRebind(
+                                        ComponentName(this, NootiListenerService::class.java)
+                                    )
+                            }
+                        } catch (_: Exception) {
+                        }
+                        result.success(true)
+                    }
+                    // 电池优化白名单：不在名单里的话，国产系统随时可能把我们冻结
+                    "batteryOk" -> result.success(
+                        (getSystemService(PowerManager::class.java))
+                            .isIgnoringBatteryOptimizations(packageName)
+                    )
+                    "openBatterySettings" -> {
+                        try {
+                            startActivity(
+                                Intent(
+                                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                    Uri.parse("package:$packageName")
+                                )
+                            )
+                        } catch (_: Exception) {
+                            try {
+                                startActivity(
+                                    Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                                )
+                            } catch (_: Exception) {
+                            }
+                        }
+                        result.success(true)
+                    }
+                    // 自启动管理：各厂商入口不一样，挨个试，都不行就退到应用详情页
+                    "openAutoStartSettings" -> {
+                        val tries = listOf(
+                            Intent().setComponent(
+                                ComponentName(
+                                    "com.huawei.systemmanager",
+                                    "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"
+                                )
+                            ),
+                            Intent().setComponent(
+                                ComponentName(
+                                    "com.huawei.systemmanager",
+                                    "com.huawei.systemmanager.appcontrol.activity.StartupAppControlActivity"
+                                )
+                            ),
+                            Intent().setComponent(
+                                ComponentName(
+                                    "com.miui.securitycenter",
+                                    "com.miui.permcenter.autostart.AutoStartManagementActivity"
+                                )
+                            ),
+                            Intent().setComponent(
+                                ComponentName(
+                                    "com.coloros.safecenter",
+                                    "com.coloros.safecenter.permission.startup.StartupAppListActivity"
+                                )
+                            ),
+                        )
+                        var opened = false
+                        for (i in tries) {
+                            try {
+                                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                startActivity(i)
+                                opened = true
+                                break
+                            } catch (_: Exception) {
+                            }
+                        }
+                        if (!opened) {
+                            try {
+                                startActivity(
+                                    Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                                        .setData(Uri.parse("package:$packageName"))
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                            } catch (_: Exception) {
+                            }
+                        }
+                        result.success(true)
+                    }
                     "openSettings" -> {
                         startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
                         result.success(true)

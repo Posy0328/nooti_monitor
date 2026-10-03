@@ -72,10 +72,14 @@ class _MonitorHomeState extends State<MonitorHome> with WidgetsBindingObserver {
   bool _enabled = false;         // 通知使用权
   bool _canNotify = false;       // Nooti 发提醒的权限
   bool _overlayOk = false;       // 悬浮窗权限：卡片能不能霸道地盖在屏幕正中央
+  int _listenerTs = 0;           // 监听服务心跳：>0 且很新 = 服务活着；旧了/没有 = 被系统杀了
+  bool _batteryOk = false;       // 电池优化白名单：不在里面的话国产系统随时冻结我们
   bool _filterOn = true;         // 过滤总开关
   bool _allGroups = true;        // 所有群都安静（默认开：不用一个个加群名）
+  bool _watchOthers = false;     // 也收录非聊天应用的通知（测试用，默认关：只看微信/QQ/钉钉等）
   int _minLevel = _kGeneral;     // 弹卡门槛：0 全部 / 1 重要以上 / 2 只有紧急
-  int _inboxFilter = 0;          // 消息页筛选：0 全部 / 1 弹过卡 / 2 已静音 / 3 群消息
+  int _inboxFilter = 0;          // 消息页筛选：0 全部 / 1 弹过卡 / 2 已静音 / 3 群消息 / 4 指定会话
+  String _inboxConv = '';        // 筛选=4 时，只看这个会话名
 
   List<String> _groups = [];                   // 安静群组（手动名单）
   List<String> _keywords = [];                 // 重点提醒词
@@ -128,6 +132,7 @@ class _MonitorHomeState extends State<MonitorHome> with WidgetsBindingObserver {
       setState(() {
         _filterOn = m['enabled'] != false;
         _allGroups = m['allGroups'] != false;
+        _watchOthers = m['watchOthers'] == true;
         _minLevel = (m['minLevel'] as num?)?.toInt() ?? _kGeneral;
         _groups = (m['groups'] as List? ?? []).map((e) => '$e').toList();
         _keywords = (m['keywords'] as List? ?? []).map((e) => '$e').toList();
@@ -145,6 +150,7 @@ class _MonitorHomeState extends State<MonitorHome> with WidgetsBindingObserver {
         'json': jsonEncode({
           'enabled': _filterOn,
           'allGroups': _allGroups,
+          'watchOthers': _watchOthers,
           'minLevel': _minLevel,
           'groups': _groups,
           'keywords': _keywords,
@@ -209,7 +215,8 @@ class _MonitorHomeState extends State<MonitorHome> with WidgetsBindingObserver {
   // ---------- 数据刷新 ----------
 
   Future<void> _refresh() async {
-    bool enabled = false, canNotify = false, overlayOk = false;
+    bool enabled = false, canNotify = false, overlayOk = false, batteryOk = false;
+    int listenerTs = 0;
     List<Map<String, dynamic>> items = const [];
     List<Map<String, dynamic>> discovered = const [];
     List<Map<String, dynamic>> todos = const [];
@@ -222,6 +229,12 @@ class _MonitorHomeState extends State<MonitorHome> with WidgetsBindingObserver {
     } catch (_) {}
     try {
       overlayOk = await _ch.invokeMethod<bool>('canOverlay') ?? false;
+    } catch (_) {}
+    try {
+      listenerTs = (await _ch.invokeMethod<int>('listenerAlive')) ?? 0;
+    } catch (_) {}
+    try {
+      batteryOk = await _ch.invokeMethod<bool>('batteryOk') ?? false;
     } catch (_) {}
     try {
       final list = await _ch.invokeMethod<List<dynamic>>('getCaptured');
@@ -258,11 +271,56 @@ class _MonitorHomeState extends State<MonitorHome> with WidgetsBindingObserver {
       _enabled = enabled;
       _canNotify = canNotify;
       _overlayOk = overlayOk;
+      _listenerTs = listenerTs;
+      _batteryOk = batteryOk;
       _items = items;
       _inbox = inbox;
       _discovered = discovered;
       _todos = todos;
     });
+  }
+
+  // 监听服务健不健康：0=没授权 1=活着 2=疑似被系统杀了
+  int get _serviceState {
+    if (!_enabled) return 0;
+    if (_listenerTs <= 0) return 2;
+    final age = DateTime.now().millisecondsSinceEpoch - _listenerTs;
+    return age < 10 * 60 * 1000 ? 1 : 2;
+  }
+
+  // 有没有抓到过微信/QQ 这类聊天应用的消息（一条都没有 = 免打扰没关 / 微信被杀）
+  bool get _seenAnyChat {
+    const chatPkgs = {
+      'com.tencent.mm', 'com.tencent.mobileqq', 'com.tencent.tim',
+      'com.tencent.wework', 'com.alibaba.android.rimet', 'com.ss.android.lark',
+    };
+    for (final m in _inbox) {
+      if (chatPkgs.contains('${m['pkg'] ?? ''}')) return true;
+    }
+    for (final m in _items) {
+      if (chatPkgs.contains('${m['pkg'] ?? ''}')) return true;
+    }
+    return false;
+  }
+
+  Future<void> _wakeService() async {
+    try {
+      await _ch.invokeMethod('requestRebind');
+    } catch (_) {}
+    await Future.delayed(const Duration(seconds: 2));
+    _refresh();
+  }
+
+  Future<void> _openBatterySettings() async {
+    try {
+      await _ch.invokeMethod('openBatterySettings');
+    } catch (_) {}
+  }
+
+  Future<void> _openAutoStartSettings() async {
+    try {
+      await _ch.invokeMethod('openAutoStartSettings');
+    } catch (_) {}
   }
 
   Future<void> _openSettings() async {
@@ -362,6 +420,24 @@ class _MonitorHomeState extends State<MonitorHome> with WidgetsBindingObserver {
         child: Text(text, style: TextStyle(fontSize: 10, color: fg)),
       );
 
+  /// 防杀三件套里的一行：图标 + 名称 + 说明 + 可选按钮
+  Widget _keepRow(IconData icon, Color color, String name, String desc,
+          (String, VoidCallback)? action) =>
+      Row(children: [
+        Icon(icon, size: 20, color: color),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(name,
+                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+            Text(desc,
+                style: const TextStyle(fontSize: 11, color: Colors.black45, height: 1.4)),
+          ]),
+        ),
+        if (action != null)
+          TextButton(onPressed: action.$2, child: Text(action.$1)),
+      ]);
+
   Widget _card({required Widget child, EdgeInsets? margin}) => Container(
         margin: margin ?? const EdgeInsets.fromLTRB(16, 10, 16, 0),
         padding: const EdgeInsets.all(14),
@@ -420,19 +496,80 @@ class _MonitorHomeState extends State<MonitorHome> with WidgetsBindingObserver {
       return t.isNotEmpty && !_groups.any((g) => t.contains(g));
     }).toList();
 
+    final svc = _serviceState;
     return ListView(children: [
-      // 权限状态
+      // 监听服务健康卡：授权 + 服务是否活着，一眼看清
       _card(
         margin: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-        child: Row(children: [
-          Icon(_enabled ? Icons.check_circle : Icons.notifications_off,
-              color: _enabled ? const Color(0xFF16A34A) : const Color(0xFFFF8A00)),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(_enabled ? '通知使用权已开启，正在监听' : '通知使用权还没开启',
-                style: const TextStyle(fontSize: 14)),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Icon(
+              svc == 1
+                  ? Icons.check_circle
+                  : (svc == 2 ? Icons.heart_broken : Icons.notifications_off),
+              color: svc == 1
+                  ? const Color(0xFF16A34A)
+                  : (svc == 2 ? const Color(0xFFE5484D) : const Color(0xFFFF8A00)),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                svc == 1
+                    ? '监听服务运行中'
+                    : (svc == 2 ? '授权还在，但监听服务被系统停了' : '通知使用权还没开启'),
+                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+              ),
+            ),
+            if (svc == 0) TextButton(onPressed: _openSettings, child: const Text('去开启')),
+            if (svc == 2) TextButton(onPressed: _wakeService, child: const Text('点我唤醒')),
+          ]),
+          if (svc == 2) ...[
+            const SizedBox(height: 6),
+            const Text(
+              '这就是「刚装上有效、过一会儿就没反应」的原因：系统把监听服务杀了。'
+              '点「点我唤醒」能立刻拉起来；想根治，把下面「防杀三件套」配好。',
+              style: TextStyle(fontSize: 11.5, color: Color(0xFF9A5410), height: 1.5),
+            ),
+          ],
+        ]),
+      ),
+
+      // 防杀三件套：电池白名单 + 自启动 + 常驻通知。国产系统不配这三样，必被杀
+      _card(
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Row(children: [
+            Icon(Icons.shield_outlined, size: 18, color: Color(0xFFE5484D)),
+            SizedBox(width: 8),
+            Text('防杀三件套（华为/小米必做）',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+          ]),
+          const SizedBox(height: 6),
+          _note('Nooti 必须在后台一直活着才能监听。手机系统会「省电」把它杀掉，'
+              '杀了就收不到、也不弹卡片——不是坏了，是被系统清了。'),
+          const SizedBox(height: 10),
+          _keepRow(
+            _batteryOk ? Icons.check_circle : Icons.battery_alert,
+            _batteryOk ? const Color(0xFF16A34A) : const Color(0xFFE5484D),
+            '电池不受限制',
+            _batteryOk ? '已加入白名单' : '没开：锁屏久了会被冻结',
+            _batteryOk ? null : ('去开启', _openBatterySettings),
           ),
-          if (!_enabled) TextButton(onPressed: _openSettings, child: const Text('去开启')),
+          const SizedBox(height: 8),
+          _keepRow(
+            Icons.rocket_launch_outlined,
+            const Color(0xFFF2843C),
+            '允许自启动',
+            '系统设置里手动开：被清掉后能自己回来',
+            ('去设置', _openAutoStartSettings),
+          ),
+          const SizedBox(height: 8),
+          _keepRow(
+            Icons.push_pin_outlined,
+            const Color(0xFF3D7FE0),
+            '常驻通知别划掉',
+            '通知栏里「Nooti 正在监听」那条要在，它在=进程在',
+            null,
+          ),
         ]),
       ),
 
@@ -482,6 +619,32 @@ class _MonitorHomeState extends State<MonitorHome> with WidgetsBindingObserver {
           ],
         ]),
       ),
+
+      // 微信/QQ 完全没消息进来时的醒目提示（真机最常见：群免打扰没关，或微信自己被杀）
+      if (_enabled && !_seenAnyChat)
+        Container(
+          margin: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+              color: const Color(0xFFFFF4E5), borderRadius: BorderRadius.circular(12)),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Row(children: [
+              Icon(Icons.search_off, size: 18, color: Color(0xFFE08A00)),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text('到现在一条微信/QQ 消息都没抓到',
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
+              ),
+            ]),
+            const SizedBox(height: 6),
+            const Text(
+              '两个最常见的坑，挨个查：\n'
+              '① 微信里群的「消息免打扰」还开着 —— 开了它，微信压根不发通知，谁也抓不到。全关掉，静音交给 Nooti。\n'
+              '② 微信自己被系统杀了 —— 平板锁屏久了，微信收消息都延迟。给微信也开「电池不受限制 + 自启动」。',
+              style: TextStyle(fontSize: 11.5, color: Color(0xFF9A5410), height: 1.6),
+            ),
+          ]),
+        ),
 
       // 必读：微信的免打扰必须关掉，否则微信自己就不发通知，谁也抓不到
       _card(
@@ -545,6 +708,19 @@ class _MonitorHomeState extends State<MonitorHome> with WidgetsBindingObserver {
             title: const Text('所有群都安静',
                 style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
             subtitle: _note('推荐打开。群消息一律不响不弹，只有命中重点词才弹卡片——不用一个个加群名。'),
+          ),
+
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            value: _watchOthers,
+            onChanged: (v) {
+              setState(() => _watchOthers = v);
+              _saveRules();
+            },
+            title: const Text('也收录其他应用的通知',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+            subtitle: _note('默认关：只看微信/QQ/钉钉等聊天应用，列表干净。'
+                '打开后什么通知都收（代理软件、输入法都会灌进来），排查问题时再开。'),
           ),
 
           const Divider(height: 18),
@@ -640,7 +816,7 @@ class _MonitorHomeState extends State<MonitorHome> with WidgetsBindingObserver {
             Text('见过的会话（${found.length}）',
                 style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
             const SizedBox(height: 2),
-            _note('这些会话来过消息。标签是 Nooti 判断的群/个人，判断错了点右边按钮纠正。'),
+            _note('这些会话来过消息。群/个人标签判断错了？点那个标签就能纠正。'),
             const SizedBox(height: 6),
             for (final d in found.take(12))
               Builder(builder: (_) {
@@ -667,19 +843,18 @@ class _MonitorHomeState extends State<MonitorHome> with WidgetsBindingObserver {
                               style: const TextStyle(fontSize: 11, color: Colors.black38)),
                       ]),
                     ),
-                    _badge(
-                        isGroup ? '群' : '个人',
-                        isGroup ? const Color(0xFFE3EEFF) : const Color(0xFFEEEFF3),
-                        isGroup ? const Color(0xFF2E6BD0) : const Color(0xFF6B7280)),
+                    // 标签可点：判断错了点一下就纠正（群 ↔ 个人）
+                    GestureDetector(
+                      onTap: () => _markGroup(pkg, t, !isGroup),
+                      child: _badge(
+                          isGroup ? '群' : '个人',
+                          isGroup ? const Color(0xFFE3EEFF) : const Color(0xFFEEEFF3),
+                          isGroup ? const Color(0xFF2E6BD0) : const Color(0xFF6B7280)),
+                    ),
                     if (isGroup)
                       TextButton(
                         onPressed: () => _addGroupName(t),
                         child: const Text('设为安静', style: TextStyle(fontSize: 12.5)),
-                      )
-                    else
-                      TextButton(
-                        onPressed: () => _markGroup(pkg, t, true),
-                        child: const Text('它其实是群', style: TextStyle(fontSize: 12.5)),
                       ),
                   ]),
                 );
@@ -710,19 +885,167 @@ class _MonitorHomeState extends State<MonitorHome> with WidgetsBindingObserver {
         return _inbox.where((m) => m['muted'] == true).toList();
       case 3:
         return _inbox.where((m) => m['isGroup'] == true).toList();
+      case 4:
+        return _inbox.where((m) => '${m['title']}' == _inboxConv).toList();
       default:
         return _inbox;
     }
   }
 
-  Widget _statCol(String label, Object n, Color c) => Expanded(
-        child: Column(children: [
-          Text('$n',
-              style: TextStyle(fontSize: 21, fontWeight: FontWeight.w800, color: c)),
-          const SizedBox(height: 2),
-          Text(label, style: const TextStyle(fontSize: 11, color: Colors.black54)),
-        ]),
+  Widget _statCol(String label, Object n, Color c, [VoidCallback? onTap]) => Expanded(
+        child: GestureDetector(
+          onTap: onTap,
+          behavior: HitTestBehavior.opaque,
+          child: Column(children: [
+            Text('$n',
+                style: TextStyle(fontSize: 21, fontWeight: FontWeight.w800, color: c)),
+            const SizedBox(height: 2),
+            Text(label, style: const TextStyle(fontSize: 11, color: Colors.black54)),
+          ]),
+        ),
       );
+
+  /// 点「会话数」：按会话聚合，看看都是谁在发，点进去只看它
+  void _showConversations() {
+    final agg = <String, Map<String, dynamic>>{};
+    for (final m in _inbox) {
+      final t = '${m['title'] ?? '（无标题）'}';
+      final a = agg.putIfAbsent(t, () => {
+            'title': t,
+            'pkg': '${m['pkg'] ?? ''}',
+            'count': 0,
+            'last': 0,
+            'isGroup': m['isGroup'] == true,
+            'sample': '${m['text'] ?? ''}',
+          });
+      a['count'] = (a['count'] as int) + ((m['count'] as num?)?.toInt() ?? 1);
+      final ts = (m['time'] as num?)?.toInt() ?? 0;
+      if (ts > (a['last'] as int)) {
+        a['last'] = ts;
+        a['sample'] = '${m['text'] ?? ''}';
+      }
+      if (m['isGroup'] == true) a['isGroup'] = true;
+    }
+    final list = agg.values.toList()
+      ..sort((a, b) => (b['last'] as int).compareTo(a['last'] as int));
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (c) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.6,
+        maxChildSize: 0.9,
+        builder: (_, sc) => ListView(controller: sc, children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(20, 0, 20, 8),
+            child: Text('都是谁在发消息',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+          ),
+          for (final a in list)
+            ListTile(
+              dense: true,
+              leading: Icon(a['isGroup'] == true ? Icons.groups : Icons.person,
+                  color: a['isGroup'] == true ? _cGeneral : const Color(0xFF9AA3B3)),
+              title: Text('${_appName('${a['pkg']}')} · ${a['title']}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600)),
+              subtitle: Text('${a['sample']}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11.5)),
+              trailing: Text('×${a['count']}',
+                  style: const TextStyle(fontSize: 12, color: Colors.black45)),
+              onTap: () {
+                Navigator.pop(c);
+                setState(() {
+                  _inboxFilter = 4;
+                  _inboxConv = '${a['title']}';
+                });
+              },
+            ),
+          const SizedBox(height: 24),
+        ]),
+      ),
+    );
+  }
+
+  /// 点一条消息：看全文 + 可以直接收入待办
+  void _showMessageDetail(Map<String, dynamic> m) {
+    final bool alerted = m['alerted'] == true;
+    final int lv = (m['level'] as num?)?.toInt() ?? _kGeneral;
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (c) => Padding(
+        padding: EdgeInsets.only(
+            left: 20, right: 20, top: 4,
+            bottom: MediaQuery.of(c).viewInsets.bottom + 24),
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+          Row(children: [
+            Container(
+              width: 10, height: 10,
+              decoration: BoxDecoration(
+                color: alerted ? _levelColor(lv) : const Color(0xFFD3D9E3),
+                shape: BoxShape.circle,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text('${_appName('${m['pkg'] ?? ''}')} · ${m['title'] ?? ''}',
+                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+            ),
+            Text(_fmtTime(m['time']),
+                style: const TextStyle(fontSize: 11, color: Colors.black38)),
+          ]),
+          const SizedBox(height: 12),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+                color: const Color(0xFFF5F7FB), borderRadius: BorderRadius.circular(10)),
+            child: SelectableText('${m['text'] ?? ''}',
+                style: const TextStyle(fontSize: 13.5, height: 1.6)),
+          ),
+          const SizedBox(height: 10),
+          Text('为什么这样处理：${m['reason'] ?? '—'}',
+              style: const TextStyle(fontSize: 11.5, color: Color(0xFF8A93A5), height: 1.5)),
+          const SizedBox(height: 16),
+          Row(children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed: () => Navigator.pop(c),
+                child: const Text('关闭'),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: FilledButton.icon(
+                onPressed: () async {
+                  try {
+                    await _ch.invokeMethod('addTodo', {
+                      'title': '${m['title'] ?? ''}',
+                      'text': '${m['text'] ?? ''}',
+                      'pkg': '${m['pkg'] ?? ''}',
+                      'kw': '${m['kw'] ?? ''}',
+                    });
+                  } catch (_) {}
+                  if (c.mounted) Navigator.pop(c);
+                  _refresh();
+                },
+                icon: const Icon(Icons.inbox_rounded, size: 18),
+                label: const Text('收入待办'),
+              ),
+            ),
+          ]),
+        ]),
+      ),
+    );
+  }
 
   Future<void> _clearInboxAsk() async {
     final ok = await showDialog<bool>(
@@ -766,10 +1089,13 @@ class _MonitorHomeState extends State<MonitorHome> with WidgetsBindingObserver {
               '不用盯着屏幕，回头翻这一页就知道一共收到了多少、都是什么。'),
           const SizedBox(height: 14),
           Row(children: [
-            _statCol('弹过卡片', alerted, _cUrgent),
-            _statCol('被静音', muted, const Color(0xFF6B7280)),
-            _statCol('来自群', groups, _cGeneral),
-            _statCol('会话数', chats, const Color(0xFF7C4DFF)),
+            _statCol('弹过卡片', alerted, _cUrgent,
+                () => setState(() => _inboxFilter = 1)),
+            _statCol('被静音', muted, const Color(0xFF6B7280),
+                () => setState(() => _inboxFilter = 2)),
+            _statCol('来自群', groups, _cGeneral,
+                () => setState(() => _inboxFilter = 3)),
+            _statCol('会话数', chats, const Color(0xFF7C4DFF), _showConversations),
           ]),
           if (_inbox.isNotEmpty) ...[
             const SizedBox(height: 10),
@@ -790,7 +1116,19 @@ class _MonitorHomeState extends State<MonitorHome> with WidgetsBindingObserver {
             ChoiceChip(
               label: Text('${f[0]}', style: const TextStyle(fontSize: 12)),
               selected: _inboxFilter == f[1],
-              onSelected: (_) => setState(() => _inboxFilter = f[1] as int),
+              onSelected: (_) => setState(() {
+                _inboxFilter = f[1] as int;
+                _inboxConv = '';
+              }),
+              visualDensity: VisualDensity.compact,
+            ),
+          if (_inboxFilter == 4)
+            InputChip(
+              label: Text('只看「$_inboxConv」', style: const TextStyle(fontSize: 12)),
+              onDeleted: () => setState(() {
+                _inboxFilter = 0;
+                _inboxConv = '';
+              }),
               visualDensity: VisualDensity.compact,
             ),
         ]),
@@ -817,6 +1155,7 @@ class _MonitorHomeState extends State<MonitorHome> with WidgetsBindingObserver {
               margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
               child: ListTile(
                 dense: true,
+                onTap: () => _showMessageDetail(m),
                 leading: Container(
                   width: 10,
                   height: 10,

@@ -47,6 +47,8 @@ jobs:
           cp "$(pick 'GroupStore.kt')"           "$K/GroupStore.kt"
           cp "$(pick 'NotifInfo.kt')"            "$K/NotifInfo.kt"
           cp "$(pick 'AlertActivity.kt')"        "$K/AlertActivity.kt"
+          cp "$(pick 'ChatApps.kt')"             "$K/ChatApps.kt"
+          cp "$(pick 'KeepAliveService.kt')"     "$K/KeepAliveService.kt"
           cp "$(pick 'CardBuilder.kt')"          "$K/CardBuilder.kt"
           cp "$(pick 'OverlayAlert.kt')"         "$K/OverlayAlert.kt"
           cp "$(pick 'InboxStore.kt')"           "$K/InboxStore.kt"
